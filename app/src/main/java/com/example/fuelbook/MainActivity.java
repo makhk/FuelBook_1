@@ -1,5 +1,8 @@
 package com.example.fuelbook;
 
+import android.webkit.WebView;
+import android.webkit.WebSettings;
+
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
@@ -170,26 +173,143 @@ public class MainActivity extends Activity {
         TextView foot = text("Mileage assumes a full tank at each fill-up.\nDistance since previous fill ÷ litres added now.", 12, secondary, false);
         foot.setGravity(Gravity.CENTER); foot.setLineSpacing(d(3), 1); root.addView(foot);
     }
+
     private void summary(FuelDb.Vehicle vehicle) {
         List<FuelDb.Fill> list = db.fills(vehicle.id);
         LinearLayout summary = card(root);
         summary.addView(text("MILEAGE AT A GLANCE", 12, secondary, true)); addSpace(summary, 12);
+
         if (list.size() < 2) {
             summary.addView(text("— km/L", 29, accent, true)); addSpace(summary, 5);
             summary.addView(text(list.isEmpty() ? "Log your first fill-up to get started." : "Add one more fill-up to calculate mileage.", 13, secondary, false));
-        } else {
-            FuelDb.Fill newer = list.get(0), older = list.get(1);
-            double distance = newer.odometer - older.odometer;
-            summary.addView(text(n(distance / newer.liters) + " km/L", 31, accent, true)); addSpace(summary, 5);
-            summary.addView(text(n(distance) + " km since last fill  ·  " + n(newer.liters) + " L added", 13, secondary, false));
-            if (newer.estimate > 0) {
-                addSpace(summary, 10);
-                double delta = (distance / newer.liters - newer.estimate) / newer.estimate * 100;
-                summary.addView(text("Vs estimate: " + (delta >= 0 ? "+" : "") + n(delta) + "%", 13, primary, true));
+            addSpace(root, 18);
+            return;
+        }
+
+        // Calculate Overall Average & Totals (Chronological Order: oldest to newest)
+        List<FuelDb.Fill> sorted = new java.util.ArrayList<>(list);
+        java.util.Collections.reverse(sorted);
+
+        double totalDistance = 0;
+        double totalFuel = 0;
+        double totalSpend = 0;
+
+        StringBuilder datesJson = new StringBuilder("[");
+        StringBuilder mileageJson = new StringBuilder("[");
+        StringBuilder expenseJson = new StringBuilder("[");
+        StringBuilder distanceJson = new StringBuilder("[");
+        StringBuilder fuelJson = new StringBuilder("[");
+
+        for (int i = 0; i < sorted.size(); i++) {
+            FuelDb.Fill f = sorted.get(i);
+            totalSpend += f.amount;
+            String shortDate = date(f.time);
+
+            if (i > 0) {
+                FuelDb.Fill prev = sorted.get(i - 1);
+                double dist = f.odometer - prev.odometer;
+                if (dist > 0 && f.liters > 0) {
+                    totalDistance += dist;
+                    totalFuel += f.liters;
+                    double kml = dist / f.liters;
+
+                    if (datesJson.length() > 1) {
+                        datesJson.append(",");
+                        mileageJson.append(",");
+                        expenseJson.append(",");
+                        distanceJson.append(",");
+                        fuelJson.append(",");
+                    }
+                    datesJson.append("'").append(shortDate).append("'");
+                    mileageJson.append(String.format(Locale.US, "%.2f", kml));
+                    expenseJson.append(String.format(Locale.US, "%.2f", f.amount));
+                    distanceJson.append(String.format(Locale.US, "%.2f", dist));
+                    fuelJson.append(String.format(Locale.US, "%.2f", f.liters));
+                }
             }
         }
+        datesJson.append("]");
+        mileageJson.append("]");
+        expenseJson.append("]");
+        distanceJson.append("]");
+        fuelJson.append("]");
+
+        double overallAvg = totalFuel > 0 ? totalDistance / totalFuel : 0;
+
+        // Hero Metric Display
+        summary.addView(text(n(overallAvg) + " km/L", 31, accent, true)); addSpace(summary, 5);
+        summary.addView(text("Overall Avg  ·  " + n(totalDistance) + " km tracked  ·  ₹" + n(totalSpend) + " total spend", 13, secondary, false));
+        
+        if (vehicle.estimate > 0) {
+            addSpace(summary, 8);
+            double delta = (overallAvg - vehicle.estimate) / vehicle.estimate * 100;
+            summary.addView(text("Vs default estimate (" + n(vehicle.estimate) + "): " + (delta >= 0 ? "+" : "") + n(delta) + "%", 13, primary, true));
+        }
+
+        addSpace(summary, 16);
+        summary.addView(text("VISUALIZATIONS", 12, secondary, true)); addSpace(summary, 10);
+
+        // Interactive Chart WebView using Chart.js
+        WebView chartWeb = new WebView(this);
+        chartWeb.setLayoutParams(lp(-1, 280));
+        WebSettings settings = chartWeb.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+
+        String html = "<!DOCTYPE html><html><head>" +
+                "<meta name='viewport' content='width=device-width, initial-scale=1.0'>" +
+                "<script src='https://cdn.jsdelivr.net/npm/chart.js'></script>" +
+                "<style>" +
+                "body { background-color: " + (dark ? "#1B2225" : "#FFFFFF") + "; color: " + (dark ? "#F3F7F7" : "#162B30") + "; font-family: sans-serif; margin: 0; padding: 0; }" +
+                ".tabs { display: flex; gap: 6px; margin-bottom: 8px; justify-content: center; }" +
+                "button { background: " + (dark ? "#263034" : "#E7F6F1") + "; color: " + (dark ? "#65DCC7" : "#0D796A") + "; border: none; padding: 6px 10px; border-radius: 6px; font-size: 11px; font-weight: bold; cursor: pointer; }" +
+                "button.active { background: " + (dark ? "#65DCC7" : "#0D796A") + "; color: " + (dark ? "#09251E" : "#FFFFFF") + "; }" +
+                ".chart-container { position: relative; height: 210px; width: 100%; }" +
+                "</style></head><body>" +
+                "<div class='tabs'>" +
+                "<button id='btn1' class='active' onclick='showChart(\"mileage\")'>Mileage</button>" +
+                "<button id='btn2' onclick='showChart(\"expense\")'>Expenses</button>" +
+                "<button id='btn3' onclick='showChart(\"distance\")'>Distance & Fuel</button>" +
+                "</div>" +
+                "<div class='chart-container'><canvas id='myChart'></canvas></div>" +
+                "<script>" +
+                "const labels = " + datesJson.toString() + ";" +
+                "const mileageData = " + mileageJson.toString() + ";" +
+                "const expenseData = " + expenseJson.toString() + ";" +
+                "const distanceData = " + distanceJson.toString() + ";" +
+                "const fuelData = " + fuelJson.toString() + ";" +
+                "const textColor = '" + (dark ? "#A2B1B4" : "#64777D") + "';" +
+                "const accentColor = '" + (dark ? "#65DCC7" : "#0D796A") + "';" +
+                "let ctx = document.getElementById('myChart').getContext('2d');" +
+                "let currentChart = new Chart(ctx, {" +
+                "  type: 'line'," +
+                "  data: {" +
+                "    labels: labels," +
+                "    datasets: [{ label: 'Mileage (km/L)', data: mileageData, borderColor: accentColor, backgroundColor: accentColor, tension: 0.2, borderWidth: 2, pointRadius: 4 }]" +
+                "  }," +
+                "  options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: textColor, font: { size: 10 } } }, y: { ticks: { color: textColor, font: { size: 10 } } } } }" +
+                "});" +
+                "function showChart(type) {" +
+                "  document.querySelectorAll('button').forEach(b => b.classList.remove('active'));" +
+                "  currentChart.destroy();" +
+                "  if(type === 'mileage') {" +
+                "    document.getElementById('btn1').classList.add('active');" +
+                "    currentChart = new Chart(ctx, { type: 'line', data: { labels: labels, datasets: [{ label: 'Mileage (km/L)', data: mileageData, borderColor: accentColor, backgroundColor: accentColor, tension: 0.2, borderWidth: 2, pointRadius: 4 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: textColor, font: { size: 10 } } }, y: { ticks: { color: textColor, font: { size: 10 } } } } } });" +
+                "  } else if(type === 'expense') {" +
+                "    document.getElementById('btn2').classList.add('active');" +
+                "    currentChart = new Chart(ctx, { type: 'bar', data: { labels: labels, datasets: [{ label: 'Expense (₹)', data: expenseData, backgroundColor: '#3b82f6' }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: textColor, font: { size: 10 } } }, y: { ticks: { color: textColor, font: { size: 10 } } } } } });" +
+                "  } else if(type === 'distance') {" +
+                "    document.getElementById('btn3').classList.add('active');" +
+                "    currentChart = new Chart(ctx, { type: 'bar', data: { labels: labels, datasets: [{ label: 'Distance (km)', data: distanceData, backgroundColor: '#10b981' }, { label: 'Fuel (L)', data: fuelData, backgroundColor: '#f59e0b' }] }, options: { responsive: true, maintainAspectRatio: false, scales: { x: { ticks: { color: textColor, font: { size: 10 } } }, y: { ticks: { color: textColor, font: { size: 10 } } } } } });" +
+                "  }" +
+                "}" +
+                "</script></body></html>";
+
+        chartWeb.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null);
+        summary.addView(chartWeb);
         addSpace(root, 18);
     }
+
     private void entryForm(FuelDb.Vehicle vehicle) {
         LinearLayout form = card(root);
         form.addView(text("New fill-up", 20, primary, true)); addSpace(form, 6);
